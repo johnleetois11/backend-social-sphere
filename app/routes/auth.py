@@ -20,15 +20,16 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception:
+        return False
 
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
-
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -53,12 +54,20 @@ def serialize_user(user: dict) -> dict:
 async def authenticate_user(email: str, password: str):
     db = get_mongo_db()
 
+    email = email.lower().strip()
+
     user = await db.users.find_one({"email": email})
 
     if not user:
         return None
 
-    if not verify_password(password, user["password_hash"]):
+    # Supports both old and new field names
+    stored_hash = user.get("password_hash") or user.get("hashed_password")
+
+    if not stored_hash:
+        return None
+
+    if not verify_password(password, stored_hash):
         return None
 
     return user
@@ -68,23 +77,35 @@ async def authenticate_user(email: str, password: str):
 async def register(user: UserCreate):
     db = get_mongo_db()
 
+    email = user.email.lower().strip()
+    username = user.username.strip()
+
     existing_user = await db.users.find_one({
         "$or": [
-            {"email": user.email},
-            {"username": user.username}
+            {"email": email},
+            {"username": username},
         ]
     })
 
     if existing_user:
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    if len(user.password.encode("utf-8")) > 72:
         raise HTTPException(
             status_code=400,
-            detail="User already exists"
+            detail="Password is too long. Please use 72 bytes or fewer."
         )
 
+    password_hash = hash_password(user.password)
+
     user_data = {
-        "username": user.username,
-        "email": user.email,
-        "password_hash": hash_password(user.password),
+        "username": username,
+        "email": email,
+
+        # Keep both names temporarily for compatibility
+        "password_hash": password_hash,
+        "hashed_password": password_hash,
+
         "avatar_url": None,
         "created_at": datetime.utcnow(),
 
@@ -102,11 +123,9 @@ async def register(user: UserCreate):
 
     created_user = await db.users.find_one({"_id": result.inserted_id})
 
-    print("🔥 USER CREATED IN MONGODB:", created_user)
-
     return {
         "message": "User created successfully",
-        "user": serialize_user(created_user)
+        "user": serialize_user(created_user),
     }
 
 
@@ -122,7 +141,7 @@ async def login(request: Request, user: LoginSchema):
 
     access_token = create_access_token({
         "sub": str(db_user["_id"]),
-        "email": db_user["email"]
+        "email": db_user["email"],
     })
 
     db = get_mongo_db()
@@ -133,19 +152,19 @@ async def login(request: Request, user: LoginSchema):
         "user_id": str(db_user["_id"]),
         "email": db_user["email"],
         "ip_address": ip_address,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.utcnow(),
     })
 
     return {
         "access_token": access_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
     }
 
 
 @router.post("/token")
 async def login_for_swagger(
     request: Request,
-    form_data: OAuth2PasswordRequestForm = Depends()
+    form_data: OAuth2PasswordRequestForm = Depends(),
 ):
     db_user = await authenticate_user(form_data.username, form_data.password)
 
@@ -158,7 +177,7 @@ async def login_for_swagger(
 
     access_token = create_access_token({
         "sub": str(db_user["_id"]),
-        "email": db_user["email"]
+        "email": db_user["email"],
     })
 
     db = get_mongo_db()
@@ -169,12 +188,12 @@ async def login_for_swagger(
         "user_id": str(db_user["_id"]),
         "email": db_user["email"],
         "ip_address": ip_address,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.utcnow(),
     })
 
     return {
         "access_token": access_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
     }
 
 
