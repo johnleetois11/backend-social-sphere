@@ -9,10 +9,21 @@ from app.core.limiter import limiter
 from app.database.mongodb import connect_to_mongo, close_mongo_connection
 
 from app.routes import (
-    auth, group, post, comment, reaction, channel,
-    ws_chat, ws_dm, ws_call,
-    idea, vote, task, event, leaderboard,
-    profile, dm, group_info,
+    auth,
+    group,
+    post,
+    comment,
+    reaction,
+    channel,
+    ws_chat,
+    ws_dm,
+    ws_call,
+    idea,
+    task,
+    event,
+    profile,
+    dm,
+    group_info,
 )
 
 
@@ -27,11 +38,21 @@ app = FastAPI(title="Social Sphere API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:58642",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:58642",
+        "https://backend-social-sphere.onrender.com",
+    ],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ── Routers ──────────────────────────────────────────────────
 app.include_router(auth.router)
@@ -46,10 +67,8 @@ app.include_router(ws_dm.router)
 app.include_router(ws_call.router)
 app.include_router(dm.router)
 app.include_router(idea.router)
-app.include_router(vote.router)
 app.include_router(event.router)
 app.include_router(task.router)
-app.include_router(leaderboard.router)
 app.include_router(profile.router)
 
 app.state.limiter = limiter
@@ -58,7 +77,7 @@ app.add_middleware(SlowAPIMiddleware)
 
 @app.get("/")
 def root():
-    return {"message": "Social Sphere Backend Running with MongoDB Atlas 🚀"}
+    return {"message": "Social Sphere Backend Running with MongoDB Atlas "}
 
 
 @app.exception_handler(RateLimitExceeded)
