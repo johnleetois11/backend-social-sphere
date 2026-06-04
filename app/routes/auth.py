@@ -15,6 +15,12 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+def serialize_datetime(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -22,14 +28,21 @@ def hash_password(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     try:
         return pwd_context.verify(plain_password, hashed_password)
-    except Exception:
+    except Exception as e:
+        print("PASSWORD VERIFY ERROR:", repr(e))
         return False
 
 
 def create_access_token(data: dict) -> str:
+    try:
+        expire_minutes = int(ACCESS_TOKEN_EXPIRE_MINUTES)
+    except Exception:
+        expire_minutes = 60
+
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.utcnow() + timedelta(minutes=expire_minutes)
     to_encode.update({"exp": expire})
+
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -47,7 +60,7 @@ def serialize_user(user: dict) -> dict:
         "hobbies": user.get("hobbies"),
         "bio": user.get("bio"),
         "avatar_url": user.get("avatar_url"),
-        "created_at": user.get("created_at"),
+        "created_at": serialize_datetime(user.get("created_at")),
     }
 
 
@@ -61,10 +74,10 @@ async def authenticate_user(email: str, password: str):
     if not user:
         return None
 
-    # Supports both old and new field names
     stored_hash = user.get("password_hash") or user.get("hashed_password")
 
     if not stored_hash:
+        print("LOGIN ERROR: User has no password_hash or hashed_password")
         return None
 
     if not verify_password(password, stored_hash):
@@ -93,7 +106,7 @@ async def register(user: UserCreate):
     if len(user.password.encode("utf-8")) > 72:
         raise HTTPException(
             status_code=400,
-            detail="Password is too long. Please use 72 bytes or fewer."
+            detail="Password is too long. Please use 72 bytes or fewer.",
         )
 
     password_hash = hash_password(user.password)
@@ -102,7 +115,7 @@ async def register(user: UserCreate):
         "username": username,
         "email": email,
 
-        # Keep both names temporarily for compatibility
+        # Save both for compatibility
         "password_hash": password_hash,
         "hashed_password": password_hash,
 
@@ -131,34 +144,49 @@ async def register(user: UserCreate):
 
 @router.post("/login")
 async def login(request: Request, user: LoginSchema):
-    db_user = await authenticate_user(user.email, user.password)
+    try:
+        db_user = await authenticate_user(user.email, user.password)
 
-    if not db_user:
+        if not db_user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials",
+            )
+
+        access_token = create_access_token({
+            "sub": str(db_user["_id"]),
+            "email": db_user["email"],
+        })
+
+        # Do not let login activity logging break login
+        try:
+            db = get_mongo_db()
+            ip_address = request.client.host if request.client else None
+
+            await db.login_activity.insert_one({
+                "user_id": str(db_user["_id"]),
+                "email": db_user["email"],
+                "ip_address": ip_address,
+                "created_at": datetime.utcnow(),
+            })
+
+        except Exception as activity_error:
+            print("LOGIN ACTIVITY ERROR:", repr(activity_error))
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("LOGIN CRASH ERROR:", repr(e))
         raise HTTPException(
-            status_code=401,
-            detail="Invalid credentials"
+            status_code=500,
+            detail=f"Login crashed: {type(e).__name__}: {str(e)}",
         )
-
-    access_token = create_access_token({
-        "sub": str(db_user["_id"]),
-        "email": db_user["email"],
-    })
-
-    db = get_mongo_db()
-
-    ip_address = request.client.host if request.client else None
-
-    await db.login_activity.insert_one({
-        "user_id": str(db_user["_id"]),
-        "email": db_user["email"],
-        "ip_address": ip_address,
-        "created_at": datetime.utcnow(),
-    })
-
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-    }
 
 
 @router.post("/token")
@@ -180,16 +208,19 @@ async def login_for_swagger(
         "email": db_user["email"],
     })
 
-    db = get_mongo_db()
+    try:
+        db = get_mongo_db()
+        ip_address = request.client.host if request.client else None
 
-    ip_address = request.client.host if request.client else None
+        await db.login_activity.insert_one({
+            "user_id": str(db_user["_id"]),
+            "email": db_user["email"],
+            "ip_address": ip_address,
+            "created_at": datetime.utcnow(),
+        })
 
-    await db.login_activity.insert_one({
-        "user_id": str(db_user["_id"]),
-        "email": db_user["email"],
-        "ip_address": ip_address,
-        "created_at": datetime.utcnow(),
-    })
+    except Exception as activity_error:
+        print("LOGIN ACTIVITY ERROR:", repr(activity_error))
 
     return {
         "access_token": access_token,
