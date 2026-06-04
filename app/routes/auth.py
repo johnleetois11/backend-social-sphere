@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt
 from passlib.context import CryptContext
@@ -39,11 +40,16 @@ def create_access_token(data: dict) -> str:
     except Exception:
         expire_minutes = 60
 
-    to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=expire_minutes)
-    to_encode.update({"exp": expire})
 
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    to_encode = data.copy()
+    to_encode.update({"exp": int(expire.timestamp())})
+
+    return jwt.encode(
+        to_encode,
+        SECRET_KEY or "supersecretkey",
+        algorithm=ALGORITHM or "HS256",
+    )
 
 
 def serialize_user(user: dict) -> dict:
@@ -114,14 +120,10 @@ async def register(user: UserCreate):
     user_data = {
         "username": username,
         "email": email,
-
-        # Save both for compatibility
         "password_hash": password_hash,
         "hashed_password": password_hash,
-
         "avatar_url": None,
         "created_at": datetime.utcnow(),
-
         "full_name": user.full_name,
         "birthdate": user.birthdate,
         "gender": user.gender,
@@ -133,7 +135,6 @@ async def register(user: UserCreate):
     }
 
     result = await db.users.insert_one(user_data)
-
     created_user = await db.users.find_one({"_id": result.inserted_id})
 
     return {
@@ -144,13 +145,42 @@ async def register(user: UserCreate):
 
 @router.post("/login")
 async def login(request: Request, user: LoginSchema):
+    db = get_mongo_db()
+
     try:
-        db_user = await authenticate_user(user.email, user.password)
+        email = user.email.lower().strip()
+        password = user.password
+
+        db_user = await db.users.find_one({"email": email})
 
         if not db_user:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=401,
-                detail="Invalid credentials",
+                content={"detail": "Invalid credentials - user not found"},
+            )
+
+        stored_hash = db_user.get("password_hash") or db_user.get("hashed_password")
+
+        if not stored_hash:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid credentials - no password hash"},
+            )
+
+        try:
+            password_ok = pwd_context.verify(password, stored_hash)
+        except Exception as password_error:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": f"Password verify crashed: {type(password_error).__name__}: {str(password_error)}"
+                },
+            )
+
+        if not password_ok:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid credentials - wrong password"},
             )
 
         access_token = create_access_token({
@@ -158,9 +188,7 @@ async def login(request: Request, user: LoginSchema):
             "email": db_user["email"],
         })
 
-        # Do not let login activity logging break login
         try:
-            db = get_mongo_db()
             ip_address = request.client.host if request.client else None
 
             await db.login_activity.insert_one({
@@ -178,14 +206,12 @@ async def login(request: Request, user: LoginSchema):
             "token_type": "bearer",
         }
 
-    except HTTPException:
-        raise
-
     except Exception as e:
-        print("LOGIN CRASH ERROR:", repr(e))
-        raise HTTPException(
+        return JSONResponse(
             status_code=500,
-            detail=f"Login crashed: {type(e).__name__}: {str(e)}",
+            content={
+                "detail": f"Login crashed final: {type(e).__name__}: {str(e)}"
+            },
         )
 
 

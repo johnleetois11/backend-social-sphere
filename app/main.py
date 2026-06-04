@@ -42,9 +42,15 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:5173",
         "http://localhost:58642",
+        "http://localhost:56700",
+        "http://localhost:55704",
+        "http://localhost:53327",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:58642",
+        "http://127.0.0.1:56700",
+        "http://127.0.0.1:55704",
+        "http://127.0.0.1:53327",
         "https://backend-social-sphere.onrender.com",
     ],
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
@@ -77,7 +83,29 @@ app.add_middleware(SlowAPIMiddleware)
 
 @app.get("/")
 def root():
-    return {"message": "Social Sphere Backend Running with MongoDB Atlas "}
+    return {"message": "Social Sphere Backend Running with MongoDB Atlas"}
+
+
+@app.get("/debug/version")
+def debug_version():
+    return {
+        "version": "auth-render-fix-v4",
+        "status": "latest code deployed",
+    }
+
+
+@app.get("/debug/env")
+def debug_env():
+    import os
+
+    return {
+        "secret_key_exists": bool(os.getenv("SECRET_KEY")),
+        "algorithm": os.getenv("ALGORITHM"),
+        "access_token_expire": os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"),
+        "mongodb_uri_exists": bool(os.getenv("MONGODB_URI")),
+        "mongodb_db_name": os.getenv("MONGODB_DB_NAME"),
+        "agora_app_id_exists": bool(os.getenv("AGORA_APP_ID")),
+    }
 
 
 @app.exception_handler(RateLimitExceeded)
