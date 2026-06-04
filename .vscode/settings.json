@@ -1,0 +1,5 @@
+{
+  "python.defaultInterpreterPath": "/home/johnlee/CCC151_FINAL_PROJECT/Social_Sphere/venv/bin/python",
+  "python.analysis.extraPaths": ["/home/johnlee/CCC151_FINAL_PROJECT/Social_Sphere"],
+  "pylance.autoImportCompletions": true
+}
