@@ -18,6 +18,18 @@ def serialize_datetime(value):
     return value
 
 
+def normalize_category(value: str | None) -> str:
+    """
+    Keep categories consistent between frontend, backend, and MongoDB.
+    """
+    allowed = {"friends", "family", "school"}
+    if not value:
+        return "friends"
+
+    cleaned = value.strip().lower()
+    return cleaned if cleaned in allowed else "friends"
+
+
 def serialize_group(
     group: dict,
     role: str | None = None,
@@ -26,14 +38,17 @@ def serialize_group(
 ):
     return {
         "id": str(group["_id"]),
+        "_id": str(group["_id"]),
         "name": group.get("name"),
         "description": group.get("description"),
         "purpose": group.get("purpose"),
-        "type": group.get("type"),
+        "type": group.get("type", "public"),
+        "category": normalize_category(group.get("category")),
         "avatar_url": group.get("avatar_url"),
         "invite_code": group.get("invite_code"),
         "owner_id": group.get("owner_id"),
         "created_at": serialize_datetime(group.get("created_at")),
+        "updated_at": serialize_datetime(group.get("updated_at")),
         "role": role,
         "member_count": member_count,
         "last_post_at": serialize_datetime(last_post.get("created_at")) if last_post else None,
@@ -69,15 +84,19 @@ async def create_group_route(
     while await db.groups.find_one({"invite_code": invite_code}):
         invite_code = generate_invite_code()
 
+    category = normalize_category(group.category)
+
     group_data = {
         "name": group.name,
         "description": group.description,
         "purpose": group.purpose,
         "type": group.type,
+        "category": category,
         "avatar_url": None,
         "invite_code": invite_code,
         "owner_id": user_id,
         "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
     }
 
     result = await db.groups.insert_one(group_data)
@@ -148,7 +167,12 @@ async def join_group_route(
             "updated_at": datetime.utcnow(),
         })
 
-    return {"message": "Joined group"}
+    return {
+        "message": "Joined group",
+        "group_id": data.group_id,
+        "group_name": group.get("name"),
+        "category": normalize_category(group.get("category")),
+    }
 
 
 @router.post("/join-by-code")
@@ -176,6 +200,7 @@ async def join_by_code_route(
             "message": "Already a member",
             "group_id": group_id,
             "group_name": group.get("name"),
+            "category": normalize_category(group.get("category")),
         }
 
     await db.group_members.insert_one({
@@ -203,6 +228,7 @@ async def join_by_code_route(
         "message": "Joined group",
         "group_id": group_id,
         "group_name": group.get("name"),
+        "category": normalize_category(group.get("category")),
     }
 
 
