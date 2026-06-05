@@ -6,7 +6,6 @@ This file does two things:
 2. Keeps a lightweight WebSocket for call request/accept/reject/end notifications.
 
 Agora handles the actual voice/video connection.
-We do not need raw WebRTC offer/answer/ice_candidate handling anymore.
 """
 
 from datetime import datetime
@@ -41,10 +40,6 @@ class AgoraTokenRequest(BaseModel):
 
 
 def mongo_id_to_agora_uid(user_id: str) -> int:
-    """
-    Agora RTC UID should be a number.
-    MongoDB user ID is a string, so we convert it to a stable numeric UID.
-    """
     return zlib.crc32(user_id.encode("utf-8")) & 0x7FFFFFFF
 
 
@@ -54,21 +49,13 @@ async def get_user_from_token(token: str):
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
-        # Your new MongoDB auth token uses "sub".
-        # Old token may use "user_id", so we support both.
         user_id = payload.get("sub") or payload.get("user_id")
 
         if not user_id or not ObjectId.is_valid(str(user_id)):
             return None
 
         db = get_mongo_db()
-
-        user = await db.users.find_one({
-            "_id": ObjectId(str(user_id))
-        })
-
-        return user
+        return await db.users.find_one({"_id": ObjectId(str(user_id))})
 
     except JWTError:
         return None
@@ -80,10 +67,7 @@ async def get_user_from_token(token: str):
 async def share_group(user_id: str, peer_id: str) -> bool:
     db = get_mongo_db()
 
-    my_groups = await db.group_members.find({
-        "user_id": user_id
-    }).to_list(length=500)
-
+    my_groups = await db.group_members.find({"user_id": user_id}).to_list(length=500)
     my_group_ids = [m.get("group_id") for m in my_groups]
 
     if not my_group_ids:
@@ -95,6 +79,24 @@ async def share_group(user_id: str, peer_id: str) -> bool:
     })
 
     return peer_membership is not None
+
+
+async def is_group_member(user_id: str, group_id: str) -> bool:
+    db = get_mongo_db()
+    return await db.group_members.find_one({
+        "user_id": user_id,
+        "group_id": group_id,
+    }) is not None
+
+
+async def get_group_member_ids(group_id: str, exclude_user_id: str | None = None) -> list[str]:
+    db = get_mongo_db()
+    query = {"group_id": group_id}
+    if exclude_user_id:
+        query["user_id"] = {"$ne": exclude_user_id}
+
+    members = await db.group_members.find(query).to_list(length=1000)
+    return [str(m.get("user_id")) for m in members if m.get("user_id")]
 
 
 @router.post("/calls/agora-token")
@@ -115,25 +117,18 @@ async def generate_agora_token(
         if not ObjectId.is_valid(data.target_id):
             raise HTTPException(status_code=400, detail="Invalid target user ID")
 
-        target = await db.users.find_one({
-            "_id": ObjectId(data.target_id)
-        })
+        target = await db.users.find_one({"_id": ObjectId(data.target_id)})
 
         if not target:
             raise HTTPException(status_code=404, detail="Target user not found")
 
         if not await share_group(user_id, data.target_id):
-            raise HTTPException(
-                status_code=403,
-                detail="You do not share a group with this user"
-            )
+            raise HTTPException(status_code=403, detail="You do not share a group with this user")
 
     agora_uid = mongo_id_to_agora_uid(user_id)
 
     current_timestamp = int(time.time())
     privilege_expire_timestamp = current_timestamp + AGORA_TOKEN_EXPIRE_SECONDS
-
-    # 1 = publisher role
     role = 1
 
     token = RtcTokenBuilder.buildTokenWithUid(
@@ -157,13 +152,16 @@ async def generate_agora_token(
 @router.websocket("/ws/call")
 async def call_signaling(websocket: WebSocket):
     """
-    This WebSocket is now only for call notification events:
+    Call notification WebSocket.
+
+    Supported events:
     - call_request
     - call_accept
     - call_reject
     - call_end
 
-    Do not send offer/answer/ice_candidate anymore when using Agora.
+    Direct call: send target_id.
+    Group call: send group_id. The server broadcasts to group members except caller.
     """
     token = websocket.query_params.get("token")
 
@@ -175,7 +173,6 @@ async def call_signaling(websocket: WebSocket):
 
     try:
         db = get_mongo_db()
-
         user = await get_user_from_token(token)
 
         if not user:
@@ -183,7 +180,6 @@ async def call_signaling(websocket: WebSocket):
             return
 
         user_id = str(user["_id"])
-
         await manager.call_connect(user_id, websocket)
 
         logger.info(f"User {user.get('username')} connected to Agora call signaling")
@@ -194,35 +190,8 @@ async def call_signaling(websocket: WebSocket):
 
                 sig_type = data.get("type")
                 target_id = data.get("target_id")
+                group_id = data.get("group_id")
                 channel_name = data.get("channel_name")
-
-                if not target_id:
-                    continue
-
-                if not ObjectId.is_valid(str(target_id)):
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "Invalid target user ID",
-                    })
-                    continue
-
-                target = await db.users.find_one({
-                    "_id": ObjectId(str(target_id))
-                })
-
-                if not target:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "Target user not found",
-                    })
-                    continue
-
-                if not await share_group(user_id, str(target_id)):
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "You do not share a group with this user",
-                    })
-                    continue
 
                 allowed_types = {
                     "call_request",
@@ -238,7 +207,14 @@ async def call_signaling(websocket: WebSocket):
                     })
                     continue
 
-                await manager.call_send(str(target_id), {
+                if not channel_name:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Missing channel_name",
+                    })
+                    continue
+
+                base_payload = {
                     **data,
                     "type": sig_type,
                     "channel_name": channel_name,
@@ -246,7 +222,71 @@ async def call_signaling(websocket: WebSocket):
                     "from_username": user.get("username"),
                     "from_avatar": user.get("avatar_url"),
                     "timestamp": datetime.utcnow().isoformat(),
-                })
+                }
+
+                # Group call request: broadcast to group members.
+                if sig_type == "call_request" and group_id:
+                    if not ObjectId.is_valid(str(group_id)):
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Invalid group ID",
+                        })
+                        continue
+
+                    if not await is_group_member(user_id, str(group_id)):
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "You are not a member of this group",
+                        })
+                        continue
+
+                    target_user_ids = await get_group_member_ids(str(group_id), exclude_user_id=user_id)
+                    sent_count = await manager.call_send_many(target_user_ids, base_payload)
+
+                    await websocket.send_json({
+                        "type": "call_request_sent",
+                        "sent_count": sent_count,
+                        "group_id": group_id,
+                        "channel_name": channel_name,
+                    })
+
+                    logger.info(
+                        f"Agora group call request from {user.get('username')} to group {group_id}, sent {sent_count}"
+                    )
+                    continue
+
+                # Direct signal: accept/reject/end or one-to-one request.
+                if not target_id:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Missing target_id or group_id",
+                    })
+                    continue
+
+                if not ObjectId.is_valid(str(target_id)):
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Invalid target user ID",
+                    })
+                    continue
+
+                target = await db.users.find_one({"_id": ObjectId(str(target_id))})
+
+                if not target:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Target user not found",
+                    })
+                    continue
+
+                if not await share_group(user_id, str(target_id)):
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "You do not share a group with this user",
+                    })
+                    continue
+
+                await manager.call_send(str(target_id), base_payload)
 
                 logger.info(
                     f"Agora call signal '{sig_type}' from {user.get('username')} to {target_id}"

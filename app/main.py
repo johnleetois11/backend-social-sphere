@@ -18,6 +18,7 @@ from app.routes import (
     ws_chat,
     ws_dm,
     ws_call,
+    ws_notifications,  # ADDED
     idea,
     task,
     event,
@@ -68,9 +69,14 @@ app.include_router(post.router)
 app.include_router(comment.router)
 app.include_router(reaction.router)
 app.include_router(channel.router)
+
+# WebSockets
 app.include_router(ws_chat.router)
 app.include_router(ws_dm.router)
 app.include_router(ws_call.router)
+app.include_router(ws_notifications.router)  # ADDED
+
+# Other routes
 app.include_router(dm.router)
 app.include_router(idea.router)
 app.include_router(event.router)
@@ -89,8 +95,8 @@ def root():
 @app.get("/debug/version")
 def debug_version():
     return {
-        "version": "auth-render-fix-v4",
-        "status": "latest code deployed",
+        "version": "auth-render-fix-v4-notifications",
+        "status": "latest code deployed with notifications websocket",
     }
 
 
@@ -105,6 +111,7 @@ def debug_env():
         "mongodb_uri_exists": bool(os.getenv("MONGODB_URI")),
         "mongodb_db_name": os.getenv("MONGODB_DB_NAME"),
         "agora_app_id_exists": bool(os.getenv("AGORA_APP_ID")),
+        "agora_certificate_exists": bool(os.getenv("AGORA_APP_CERTIFICATE")),
     }
 
 

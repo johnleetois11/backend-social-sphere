@@ -25,20 +25,13 @@ async def get_user_from_token(token: str):
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
-        # New MongoDB auth token uses "sub"
         user_id = payload.get("sub") or payload.get("user_id")
 
         if not user_id or not ObjectId.is_valid(str(user_id)):
             return None
 
         db = get_mongo_db()
-
-        user = await db.users.find_one({
-            "_id": ObjectId(str(user_id))
-        })
-
-        return user
+        return await db.users.find_one({"_id": ObjectId(str(user_id))})
 
     except JWTError:
         return None
@@ -49,11 +42,25 @@ async def get_user_from_token(token: str):
 
 async def is_group_member(user_id: str, group_id: str):
     db = get_mongo_db()
-
     return await db.group_members.find_one({
         "user_id": user_id,
         "group_id": group_id,
     })
+
+
+async def notify_group_members(group_id: str, sender_id: str, payload: dict):
+    """Send a top-popup notification to all group members except sender."""
+    db = get_mongo_db()
+
+    members = await db.group_members.find({
+        "group_id": group_id,
+        "user_id": {"$ne": sender_id},
+    }).to_list(length=1000)
+
+    for member in members:
+        target_user_id = str(member.get("user_id"))
+        if target_user_id:
+            await manager.notification_send(target_user_id, payload)
 
 
 @router.websocket("/ws/chat/{channel_id}")
@@ -68,7 +75,6 @@ async def chat(websocket: WebSocket, channel_id: str):
 
     try:
         db = get_mongo_db()
-
         user = await get_user_from_token(token)
 
         if not user:
@@ -81,15 +87,14 @@ async def chat(websocket: WebSocket, channel_id: str):
             await websocket.close(code=4004)
             return
 
-        channel = await db.channels.find_one({
-            "_id": ObjectId(channel_id)
-        })
+        channel = await db.channels.find_one({"_id": ObjectId(channel_id)})
 
         if not channel:
             await websocket.close(code=4004)
             return
 
         group_id = channel.get("group_id")
+        channel_name = channel.get("name", "general")
 
         membership = await is_group_member(user_id, group_id)
 
@@ -106,9 +111,8 @@ async def chat(websocket: WebSocket, channel_id: str):
             "is_online": True,
         })
 
-        # Send message history, oldest to newest
         history = await db.messages.find({
-            "channel_id": channel_id
+            "channel_id": channel_id,
         }).sort("created_at", 1).limit(50).to_list(length=50)
 
         for message in history:
@@ -116,9 +120,7 @@ async def chat(websocket: WebSocket, channel_id: str):
             sender_id = str(message.get("user_id"))
 
             if ObjectId.is_valid(sender_id):
-                sender = await db.users.find_one({
-                    "_id": ObjectId(sender_id)
-                })
+                sender = await db.users.find_one({"_id": ObjectId(sender_id)})
 
             await websocket.send_json({
                 "type": "history",
@@ -162,17 +164,30 @@ async def chat(websocket: WebSocket, channel_id: str):
                     }
 
                     result = await db.messages.insert_one(message_data)
+                    created_message = await db.messages.find_one({"_id": result.inserted_id})
 
-                    created_message = await db.messages.find_one({
-                        "_id": result.inserted_id
-                    })
-
-                    await manager.channel_broadcast(channel_id, {
+                    payload_out = {
                         "type": "message",
                         "id": str(created_message["_id"]),
                         "user_id": user_id,
                         "username": user.get("username"),
                         "avatar_url": user.get("avatar_url"),
+                        "content": created_message.get("content"),
+                        "message_type": created_message.get("message_type", "text"),
+                        "timestamp": serialize_datetime(created_message.get("created_at")),
+                    }
+
+                    await manager.channel_broadcast(channel_id, payload_out)
+
+                    await notify_group_members(group_id, user_id, {
+                        "type": "chat_message",
+                        "id": str(created_message["_id"]),
+                        "group_id": group_id,
+                        "channel_id": channel_id,
+                        "channel_name": channel_name,
+                        "from_user_id": user_id,
+                        "from_username": user.get("username"),
+                        "from_avatar": user.get("avatar_url"),
                         "content": created_message.get("content"),
                         "message_type": created_message.get("message_type", "text"),
                         "timestamp": serialize_datetime(created_message.get("created_at")),
@@ -195,7 +210,6 @@ async def chat(websocket: WebSocket, channel_id: str):
     finally:
         if user:
             user_id = str(user["_id"])
-
             manager.channel_disconnect(channel_id, user_id, websocket)
 
             await manager.channel_broadcast(channel_id, {

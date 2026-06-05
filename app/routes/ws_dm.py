@@ -25,19 +25,13 @@ async def get_user_from_token(token: str):
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
         user_id = payload.get("sub") or payload.get("user_id")
 
         if not user_id or not ObjectId.is_valid(str(user_id)):
             return None
 
         db = get_mongo_db()
-
-        user = await db.users.find_one({
-            "_id": ObjectId(str(user_id))
-        })
-
-        return user
+        return await db.users.find_one({"_id": ObjectId(str(user_id))})
 
     except JWTError:
         return None
@@ -49,10 +43,7 @@ async def get_user_from_token(token: str):
 async def share_group(user_id: str, peer_id: str):
     db = get_mongo_db()
 
-    my_groups = await db.group_members.find({
-        "user_id": user_id
-    }).to_list(length=500)
-
+    my_groups = await db.group_members.find({"user_id": user_id}).to_list(length=500)
     my_group_ids = [m.get("group_id") for m in my_groups]
 
     if not my_group_ids:
@@ -78,7 +69,6 @@ async def dm_chat(websocket: WebSocket, peer_id: str):
 
     try:
         db = get_mongo_db()
-
         user = await get_user_from_token(token)
 
         if not user:
@@ -91,9 +81,7 @@ async def dm_chat(websocket: WebSocket, peer_id: str):
             await websocket.close(code=4004)
             return
 
-        peer = await db.users.find_one({
-            "_id": ObjectId(peer_id)
-        })
+        peer = await db.users.find_one({"_id": ObjectId(peer_id)})
 
         if not peer:
             await websocket.close(code=4004)
@@ -142,10 +130,7 @@ async def dm_chat(websocket: WebSocket, peer_id: str):
                     }
 
                     result = await db.direct_messages.insert_one(message_data)
-
-                    created_message = await db.direct_messages.find_one({
-                        "_id": result.inserted_id
-                    })
+                    created_message = await db.direct_messages.find_one({"_id": result.inserted_id})
 
                     payload_out = {
                         "type": "message",
@@ -162,19 +147,21 @@ async def dm_chat(websocket: WebSocket, peer_id: str):
 
                     await manager.dm_send(user_id, peer_id, payload_out)
 
+                    await manager.notification_send(peer_id, {
+                        "type": "dm_message",
+                        "id": str(created_message["_id"]),
+                        "from_user_id": user_id,
+                        "from_username": user.get("username"),
+                        "from_avatar": user.get("avatar_url"),
+                        "content": created_message.get("content"),
+                        "message_type": created_message.get("message_type", "text"),
+                        "timestamp": serialize_datetime(created_message.get("created_at")),
+                    })
+
                 elif msg_type == "seen":
                     await db.direct_messages.update_many(
-                        {
-                            "sender_id": peer_id,
-                            "receiver_id": user_id,
-                            "is_read": False,
-                        },
-                        {
-                            "$set": {
-                                "is_read": True,
-                                "read_at": datetime.utcnow(),
-                            }
-                        },
+                        {"sender_id": peer_id, "receiver_id": user_id, "is_read": False},
+                        {"$set": {"is_read": True, "read_at": datetime.utcnow()}},
                     )
 
                     await manager.dm_send(user_id, peer_id, {
@@ -192,7 +179,6 @@ async def dm_chat(websocket: WebSocket, peer_id: str):
     finally:
         if user:
             user_id = str(user["_id"])
-
             manager.dm_disconnect(user_id, peer_id, websocket)
 
             await manager.dm_send(user_id, peer_id, {
