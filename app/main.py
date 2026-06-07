@@ -25,6 +25,7 @@ from app.routes import (
     profile,
     dm,
     group_info,
+    auth_google,
 )
 
 
@@ -86,6 +87,7 @@ app.include_router(profile.router)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
+app.include_router(auth_google.router)
 
 @app.get("/")
 def root():
